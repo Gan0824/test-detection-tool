@@ -1,0 +1,17 @@
+# 旱獭&洞穴检测网页工具
+基于YOLOv8 + Streamlit开发的无人机影像检测工具
+
+## 在线使用
+https://marmot-detection-tool.streamlit.app
+
+## 功能
+1. 上传无人机影像（单张/批量）
+2. 调整检测置信度阈值
+3. 选择检测类别（旱獭/洞穴）
+4. 可视化检测结果
+5. 下载检测后的图片
+
+## 本地运行
+```bash
+pip install -r requirements.txt
+streamlit run app.py
