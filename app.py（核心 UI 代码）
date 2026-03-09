@@ -1,0 +1,202 @@
+import streamlit as st
+import cv2
+import numpy as np
+from ultralytics import YOLO
+import os
+from PIL import Image
+import tempfile
+import pandas as pd
+import zipfile
+
+# -------------------------- 页面配置 --------------------------
+st.set_page_config(
+    page_title="旱獭&洞穴检测工具",
+    page_icon="🦫",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# -------------------------- 全局变量 --------------------------
+RESULT_FILES = []  # 存储检测结果文件路径
+
+# -------------------------- 侧边栏配置 --------------------------
+st.sidebar.title("🦫 旱獭&洞穴检测工具")
+st.sidebar.divider()
+
+# 1. 模型加载
+st.sidebar.subheader("1. 选择检测模型")
+model_option = st.sidebar.selectbox(
+    "模型类型",
+    ["默认测试模型（YOLOv8s）", "上传自定义训练模型"],
+    index=0
+)
+
+model = None
+if model_option == "上传自定义训练模型":
+    model_file = st.sidebar.file_uploader(
+        "上传YOLO模型（.pt）",
+        type=["pt"],
+        help="上传你训练好的best.pt文件"
+    )
+    if model_file is not None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pt") as tmp_file:
+            tmp_file.write(model_file.read())
+            model_path = tmp_file.name
+        model = YOLO(model_path)
+        st.sidebar.success("✅ 模型加载成功！")
+else:
+    model = YOLO("yolov8s.pt")
+    st.sidebar.info("⚠️ 已加载默认YOLOv8s测试模型（精度有限）")
+
+# 2. 检测参数
+st.sidebar.subheader("2. 检测参数")
+conf_threshold = st.sidebar.slider(
+    "置信度阈值",
+    min_value=0.1, max_value=1.0, value=0.5, step=0.05,
+    help="值越高，误检越少但可能漏检"
+)
+
+# 3. 类别选择
+st.sidebar.subheader("3. 检测类别")
+detect_classes = st.sidebar.multiselect(
+    "选择检测目标",
+    ["旱獭（marmot）", "洞穴（cave）"],
+    default=["旱獭（marmot）", "洞穴（cave）"]
+)
+
+st.sidebar.divider()
+st.sidebar.markdown("""
+📌 **操作指南**
+1. 上传无人机影像（JPG/PNG/TIF）
+2. 调整检测参数（建议默认0.5）
+3. 点击「开始检测」
+4. 查看/下载检测结果
+""")
+
+# -------------------------- 主页面 --------------------------
+st.title("无人机影像 - 旱獭&洞穴智能检测")
+st.divider()
+
+# 分栏布局
+col1, col2 = st.columns(2, gap="large")
+
+with col1:
+    st.subheader("📤 上传影像文件")
+    uploaded_files = st.file_uploader(
+        "支持单张/批量上传",
+        type=["jpg", "png", "tif", "jpeg"],
+        accept_multiple_files=True
+    )
+    
+    # 显示上传的图片
+    if uploaded_files:
+        st.success(f"✅ 已上传 {len(uploaded_files)} 张图片")
+        
+        # 预览选中的图片
+        selected_img = st.selectbox(
+            "预览图片",
+            [f.name for f in uploaded_files],
+            index=0
+        )
+        
+        for file in uploaded_files:
+            if file.name == selected_img:
+                img = Image.open(file)
+                st.image(img, caption=f"原始图片：{file.name}", use_column_width=True)
+                break
+
+with col2:
+    st.subheader("📊 检测结果")
+    
+    # 检测按钮
+    if st.button("🚀 开始检测", type="primary", disabled=not uploaded_files or model is None):
+        RESULT_FILES.clear()
+        progress_bar = st.progress(0)
+        result_placeholder = st.empty()
+        
+        # 遍历检测所有图片
+        for idx, file in enumerate(uploaded_files):
+            # 更新进度
+            progress_bar.progress((idx + 1) / len(uploaded_files))
+            
+            # 读取图片
+            img = Image.open(file)
+            img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            
+            # 过滤检测类别
+            class_mapping = {"旱獭（marmot）": 0, "洞穴（cave）": 1}
+            selected_class_ids = [class_mapping[c] for c in detect_classes]
+            
+            # 执行检测
+            results = model(
+                img_cv,
+                conf=conf_threshold,
+                classes=selected_class_ids
+            )
+            
+            # 可视化结果
+            result_img = results[0].plot()
+            result_img_rgb = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
+            result_pil = Image.fromarray(result_img_rgb)
+            
+            # 保存结果图片
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                result_pil.save(tmp, format="JPEG")
+                RESULT_FILES.append({
+                    "name": f"detected_{file.name}",
+                    "path": tmp.name,
+                    "original": file.name,
+                    "marmot_count": sum(1 for b in results[0].boxes if int(b.cls) == 0),
+                    "cave_count": sum(1 for b in results[0].boxes if int(b.cls) == 1)
+                })
+            
+            # 显示当前图片结果
+            result_placeholder.subheader(f"🔍 {file.name} 检测结果")
+            result_placeholder.image(result_pil, use_column_width=True)
+            
+            # 显示统计信息
+            result_placeholder.info(f"""
+                📈 统计结果：
+                - 旱獭数量：{RESULT_FILES[-1]['marmot_count']}
+                - 洞穴数量：{RESULT_FILES[-1]['cave_count']}
+                - 置信度阈值：{conf_threshold}
+            """)
+            
+            # 单文件下载
+            with open(RESULT_FILES[-1]['path'], "rb") as f:
+                result_placeholder.download_button(
+                    label=f"💾 下载{file.name}结果",
+                    data=f,
+                    file_name=RESULT_FILES[-1]['name'],
+                    mime="image/jpeg"
+                )
+        
+        # 批量下载按钮
+        if len(RESULT_FILES) > 1:
+            # 创建压缩包
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as zip_tmp:
+                with zipfile.ZipFile(zip_tmp, "w") as zf:
+                    for f in RESULT_FILES:
+                        zf.write(f["path"], f["name"])
+            
+            with open(zip_tmp.name, "rb") as f:
+                st.download_button(
+                    label="📦 批量下载所有检测结果",
+                    data=f,
+                    file_name="marmot_detection_results.zip",
+                    mime="application/zip"
+                )
+        
+        progress_bar.empty()
+        st.success("🎉 所有图片检测完成！")
+    
+    # 无上传文件时的提示
+    if not uploaded_files:
+        st.info("请先在左侧上传无人机影像文件")
+
+# -------------------------- 底部信息 --------------------------
+st.divider()
+st.caption("""
+📝 说明：本工具基于YOLOv8开发，检测精度取决于训练模型质量；
+建议使用自己标注训练的模型以获得最佳效果。
+""")
